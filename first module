@@ -1,0 +1,46 @@
+#include <SoftwareSerial.h>
+#include <DHT.h>
+
+// 1. Pahilya box sathi BOX_ID "B1" theva
+const String BOX_ID = "B1"; 
+
+#define DHTPIN 4
+#define DHTTYPE DHT11
+#define MQ2PIN A0
+#define VIB_DO_PIN 5
+
+DHT dht(DHTPIN, DHTTYPE);
+SoftwareSerial hc12(2, 3); // RX = D2, TX = D3
+
+void setup() {
+  Serial.begin(9600);
+  hc12.begin(9600);
+  dht.begin();
+  
+  pinMode(MQ2PIN, INPUT);
+  pinMode(VIB_DO_PIN, INPUT);
+}
+
+void loop() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  int gas = analogRead(MQ2PIN);
+  int vib = digitalRead(VIB_DO_PIN); 
+
+  if (isnan(temp) || isnan(hum)) {
+    temp = 0.0;
+    hum = 0.0;
+  }
+
+  static unsigned long lastSend = 0;
+  // Pratyek 3 secondanantara chain start karnyasathi packet pathva
+  if (millis() - lastSend > 3000) {
+    lastSend = millis();
+    
+    // Keval shuddha packet format: "B1,24.3,57.0,22,1"
+    String packet = BOX_ID + "," + String(temp, 1) + "," + String(hum, 1) + "," + String(gas) + "," + String(vib);
+    
+    hc12.println(packet);
+    Serial.println("Gagzavnilia: " + packet);
+  }
+}
