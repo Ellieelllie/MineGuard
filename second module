@@ -1,0 +1,57 @@
+#include <SoftwareSerial.h>
+#include <DHT.h>
+
+const String BOX_ID = "B2"; // მეორე ყუთის იდენტიფიკატორი
+
+#define DHTPIN 4
+#define DHTTYPE DHT11
+#define MQ2PIN A0
+#define VIB_DO_PIN 5
+
+DHT dht(DHTPIN, DHTTYPE);
+SoftwareSerial hc12(2, 3); // RX = D2, TX = D3
+
+void setup() {
+  Serial.begin(9600);
+  hc12.begin(9600);
+  dht.begin();
+  
+  pinMode(MQ2PIN, INPUT);
+  pinMode(VIB_DO_PIN, INPUT);
+  
+  Serial.println("ყუთი B3 ჩაირთო და ელოდება ჯაჭვს...");
+}
+
+void loop() {
+  // თუ რადიომოდულში შემოდის მონაცემები წინა ყუთებიდან
+  if (hc12.available() > 0) {
+    String incomingChain = hc12.readStringUntil('\n');
+    incomingChain.trim(); // ვასუფთავებთ ზედმეტი გამოტოვებებისგან
+    
+    if (incomingChain.length() > 0) {
+      // ვამოწმებთ, რომ ჩვენი სახელი (B3) უკვე არ იყოს ჯაჭვში
+      if (incomingChain.indexOf(BOX_ID) == -1) {
+        Serial.println("მიღებულია ჯაჭვი: " + incomingChain);
+        
+        // ვკითხულობთ ჩვენს სენსორებს
+        float temp = dht.readTemperature();
+        float hum = dht.readHumidity();
+        int gas = analogRead(MQ2PIN);
+        int vib = digitalRead(VIB_DO_PIN); 
+
+        if (isnan(temp) || isnan(hum)) {
+          temp = 0.0;
+          hum = 0.0;
+        }
+
+        // ვამზადებთ ჩვენს პაკეტს და ვუერთებთ არსებულ ჯაჭვს
+        String myPacket = BOX_ID + "," + String(temp, 1) + "," + String(hum, 1) + "," + String(gas) + "," + String(vib);
+        String fullChain = incomingChain + " | " + myPacket;
+        
+        delay(50); // მცირე დაყოვნება კონფლიქტის ასაცილებლად
+        hc12.println(fullChain); // ვგზავნით წინ (ESP8266 მიმღებისკენ ან შემდეგი ყუთისკენ)
+        Serial.println("გადაგზავნილია ჯაჭვი: " + fullChain);
+      }
+    }
+  }
+}
