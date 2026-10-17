@@ -1,0 +1,326 @@
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <ESPAsyncTCP.h>
+#include <SoftwareSerial.h>
+
+// საკუთარი Wi-Fi ქსელის პარამეტრები (Access Point)
+const char* ap_ssid = "Mine_Guard";
+const char* ap_pass = "mineguard123";
+
+// ობიექტები
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+// HC-12 SoftwareSerial: GPIO14 (D5) -> TX, GPIO12 (D6) -> RX
+SoftwareSerial hc12(14, 12);
+
+String lastData = "";
+
+// -------------------------------------------------------------
+// ჩაშენებული HTML / CSS / JS ვებ-გვერდი
+// -------------------------------------------------------------
+const char HTML_INDEX[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="ka">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mine Guard - ცენტრალური მონიტორინგი</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            color: #38bdf8;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            color: #94a3b8;
+            margin-bottom: 20px;
+            font-size: 0.95rem;
+        }
+        .add-btn {
+            background-color: #0284c7;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 1rem;
+            font-weight: bold;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 25px;
+            transition: background 0.3s;
+        }
+        .add-btn:hover {
+            background-color: #0369a1;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 20px;
+            width: 100%;
+            max-width: 1200px;
+        }
+        .card {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+            border: 1px solid #334155;
+            text-align: center;
+            position: relative;
+        }
+        .card h2 {
+            color: #f43f5e;
+            margin-top: 0;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 10px;
+        }
+        .remove-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: transparent;
+            border: none;
+            color: #94a3b8;
+            font-size: 1.2rem;
+            cursor: pointer;
+        }
+        .remove-btn:hover {
+            color: #ef4444;
+        }
+        .data-row {
+            font-size: 1.05rem;
+            margin: 12px 0;
+            display: flex;
+            justify-content: space-between;
+            padding: 0 10px;
+        }
+        .val {
+            font-weight: bold;
+            color: #38bdf8;
+        }
+        .gas-normal, .vib-normal {
+            color: #4ade80;
+            font-weight: bold;
+        }
+        .gas-alert, .vib-alert {
+            color: #ef4444;
+            font-weight: bold;
+            animation: blink 1s infinite;
+        }
+        @keyframes blink {
+            50% { opacity: 0.4; }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Mine Guard</h1>
+    <div class="subtitle">შახტის უსაფრთხოების ცენტრალური მონიტორინგი</div>
+
+    <button class="add-btn" onclick="addNewBox()">+ ახალი ყუთის დამატება</button>
+
+    <div class="grid" id="boxesGrid">
+        <div class="card" id="card-B1">
+            <button class="remove-btn" onclick="removeBox('B1')">✕</button>
+            <h2>ყუთი B1</h2>
+            <div class="data-row"><span>ტემპერატურა:</span> <span class="val" id="t-B1">--</span></div>
+            <div class="data-row"><span>ტენიანობა:</span> <span class="val" id="h-B1">--</span></div>
+            <div class="data-row"><span>გაზი:</span> <span id="g-B1">--</span></div>
+            <div class="data-row"><span>ვიბრაცია:</span> <span id="v-B1">--</span></div>
+        </div>
+        <div class="card" id="card-B2">
+            <button class="remove-btn" onclick="removeBox('B2')">✕</button>
+            <h2>ყუთი B2</h2>
+            <div class="data-row"><span>ტემპერატურა:</span> <span class="val" id="t-B2">--</span></div>
+            <div class="data-row"><span>ტენიანობა:</span> <span class="val" id="h-B2">--</span></div>
+            <div class="data-row"><span>გაზი:</span> <span id="g-B2">--</span></div>
+            <div class="data-row"><span>ვიბრაცია:</span> <span id="v-B2">--</span></div>
+        </div>
+        <div class="card" id="card-B3">
+            <button class="remove-btn" onclick="removeBox('B3')">✕</button>
+            <h2>ყუთი B3</h2>
+            <div class="data-row"><span>ტემპერატურა:</span> <span class="val" id="t-B3">--</span></div>
+            <div class="data-row"><span>ტენიანობა:</span> <span class="val" id="h-B3">--</span></div>
+            <div class="data-row"><span>გაზი:</span> <span id="g-B3">--</span></div>
+            <div class="data-row"><span>ვიბრაცია:</span> <span id="v-B3">--</span></div>
+        </div>
+        <div class="card" id="card-B4">
+            <button class="remove-btn" onclick="removeBox('B4')">✕</button>
+            <h2>ყუთი B4</h2>
+            <div class="data-row"><span>ტემპერატურა:</span> <span class="val" id="t-B4">--</span></div>
+            <div class="data-row"><span>ტენიანობა:</span> <span class="val" id="h-B4">--</span></div>
+            <div class="data-row"><span>გაზი:</span> <span id="g-B4">--</span></div>
+            <div class="data-row"><span>ვიბრაცია:</span> <span id="v-B4">--</span></div>
+        </div>
+    </div>
+
+    <script>
+        let activeBoxes = ['B1', 'B2', 'B3', 'B4'];
+        let gateway = ws://${window.location.hostname}/ws;
+        let websocket;
+
+        function initWebSocket() {
+            websocket = new WebSocket(gateway);
+            websocket.onmessage = onMessage;
+            websocket.onclose = function() {
+                setTimeout(initWebSocket, 2000);
+            };
+        }
+
+        function onMessage(event) {
+            let parts = event.data.split(',');
+            if (parts.length >= 5) {
+                let id = parts[0].trim();
+                let temp = parseFloat(parts[1]);
+                let hum = parseFloat(parts[2]);
+                let gas = parseInt(parts[3]);
+                let vib = parseInt(parts[4]);
+
+                if (activeBoxes.includes(id)) {
+                    let tempFormatted = temp > 0 ? +${temp.toFixed(1)}°C : ${temp.toFixed(1)}°C;
+                    let tElem = document.getElementById(t-${id});
+                    let hElem = document.getElementById(h-${id});
+                    let gElem = document.getElementById(g-${id});
+                    let vElem = document.getElementById(v-${id});
+
+                    if (tElem) tElem.innerText = tempFormatted;
+                    if (hElem) hElem.innerText = ${hum.toFixed(1)} %;
+                    
+                    if (gElem) {
+                        gElem.innerText = gas;
+                        gElem.className = gas > 400 ? 'gas-alert' : 'gas-normal';
+                    }
+                    
+                    if (vElem) {
+                        // გასწორებული ვიბრაციის ლოგიკა (vib === 0 ნიშნავს რყევას)
+                        if (vib === 0) {
+                            vElem.innerText = "რყევა!";
+                            vElem.className = 'vib-alert';
+                        } else {
+                            vElem.innerText = "ნორმა";
+                            vElem.className = 'vib-normal';
+                        }
+                    }
+                }
+            }
+        }
+
+        function addNewBox() {
+            let boxID = prompt("შეიყვანეთ ახალი ყუთის ID (მაგ: B5):", B${activeBoxes.length + 1});
+            if (!boxID) return;
+            let cleanID = boxID.trim().toUpperCase();
+            if (activeBoxes.includes(cleanID)) { 
+                alert("ეს ID უკვე არსებობს!"); 
+                return; 
+            }
+            activeBoxes.push(cleanID);
+
+            let grid = document.getElementById('boxesGrid');
+            let newCard = document.createElement('div');
+            newCard.className = 'card';
+            newCard.id = card-${cleanID};
+            newCard.innerHTML = `
+                <button class="remove-btn" onclick="removeBox('${cleanID}')">✕</button>
+                <h2>ყუთი ${cleanID}</h2>
+                <div class="data-row"><span>ტემპერატურა:</span> <span class="val" id="t-${cleanID}">--</span></div>
+                <div class="data-row"><span>ტენიანობა:</span> <span class="val" id="h-${cleanID}">--</span></div>
+                <div class="data-row"><span>გაზი:</span> <span id="g-${cleanID}">--</span></div>
+                <div class="data-row"><span>ვიბრაცია:</span> <span id="v-${cleanID}">--</span></div>
+            `;
+            grid.appendChild(newCard);
+        }
+
+        function removeBox(boxID) {
+            let card = document.getElementById(card-${boxID});
+            if (card) {
+                card.remove();
+                activeBoxes = activeBoxes.filter(id => id !== boxID);
+            }
+        }
+
+        window.addEventListener('load', initWebSocket);
+    </script>
+</body>
+</html>
+)rawliteral";
+
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    Serial.printf("WebSocket კლიენტი დაკავშირდა: #%u\n", client->id());
+    if (lastData.length() > 0) {
+      client->text(lastData);
+    }
+  } else if (type == WS_EVT_DISCONNECT) {
+    Serial.printf("WebSocket კლიენტი გაეთიშა: #%u\n", client->id());
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  hc12.begin(9600);
+
+  // ვრთავთ ESP8266-ს Access Point (Wi-Fi წერტილის) რეჟიმში
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ap_ssid, ap_pass);
+
+  Serial.println("\nAccess Point რეჟიმი გააქტიურდა!");
+  Serial.print("Wi-Fi ქსელის სახელი: ");
+  Serial.println(ap_ssid);
+  Serial.print("IP მისამართი: ");
+  Serial.println(WiFi.softAPIP()); // 192.168.4.1
+
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", HTML_INDEX);
+  });
+
+  server.begin();
+}
+
+void loop() {
+  ws.cleanupClients();
+
+  if (hc12.available()) {
+    String incoming = hc12.readStringUntil('\n');
+    incoming.trim();
+
+    if (incoming.length() > 0) {
+      lastData = incoming;
+      Serial.print("HC-12-დან მიღებულია: ");
+      Serial.println(incoming);
+
+      // ჯაჭვის დაშლა '|' სიმბოლოთი და თითოეულის ცალ-ცალკე გაგზავნა
+      int startIndex = 0;
+      int separatorIndex = incoming.indexOf('|');
+      
+      while (separatorIndex != -1) {
+        String singleBox = incoming.substring(startIndex, separatorIndex);
+        singleBox.trim();
+        if (singleBox.length() > 0) {
+          ws.textAll(singleBox);
+          delay(10);
+        }
+        startIndex = separatorIndex + 1;
+        separatorIndex = incoming.indexOf('|', startIndex);
+      }
+      
+      String lastBox = incoming.substring(startIndex);
+      lastBox.trim();
+      if (lastBox.length() > 0) {
+        ws.textAll(lastBox);
+      }
+    }
+  }
+}
