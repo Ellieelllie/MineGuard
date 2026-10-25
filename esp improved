@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ka">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mine Guard - ცენტრალური მონიტორინგი</title>
+<style>
+  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:#0f172a; color:#f8fafc;
+         margin:0; padding:20px; display:flex; flex-direction:column; align-items:center; }
+  h1 { color:#38bdf8; margin-bottom:10px; }
+  .subtitle { color:#94a3b8; margin-bottom:20px; font-size:.95rem; }
+  .add-btn { background:#0284c7; color:#fff; border:none; padding:12px 24px; font-size:1rem; font-weight:bold;
+             border-radius:8px; cursor:pointer; margin-bottom:25px; transition:background .3s; }
+  .add-btn:hover { background:#0369a1; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:20px; width:100%; max-width:1200px; }
+  .card { background:#1e293b; border-radius:12px; padding:20px; box-shadow:0 10px 15px -3px rgba(0,0,0,.3);
+          border:2px solid #334155; text-align:center; position:relative; transition:border-color .3s; }
+  .card.warn  { border-color:#f59e0b; }
+  .card.alert { border-color:#ef4444; }
+  .card.lost  { border-color:#64748b; opacity:.75; }
+  .card h2 { color:#f43f5e; margin-top:0; border-bottom:1px solid #334155; padding-bottom:10px; }
+  .remove-btn { position:absolute; top:10px; right:10px; background:transparent; border:none; color:#94a3b8;
+                font-size:1.2rem; cursor:pointer; }
+  .remove-btn:hover { color:#ef4444; }
+  .data-row { font-size:1.05rem; margin:12px 0; display:flex; justify-content:space-between; padding:0 10px; }
+  .val { font-weight:bold; color:#38bdf8; }
+  .ok-txt { color:#4ade80; font-weight:bold; }
+  .warn-txt { color:#f59e0b; font-weight:bold; animation:blink 1s infinite; }
+  .alert-txt { color:#ef4444; font-weight:bold; animation:blink 1s infinite; }
+  .lost-txt { color:#94a3b8; font-weight:bold; }
+  .status { margin-top:14px; padding:8px; border-radius:8px; font-size:.95rem; font-weight:bold; background:#0f172a; }
+  .banner { width:100%; max-width:1200px; box-sizing:border-box; padding:14px 18px; margin-bottom:20px;
+            border-radius:10px; font-weight:bold; line-height:1.6; }
+  .banner.hidden { display:none; }
+  .banner.warn  { background:#78350f; border:1px solid #f59e0b; }
+  .banner.alert { background:#7f1d1d; border:1px solid #ef4444; }
+  @keyframes blink { 50% { opacity:.4; } }
+</style>
+</head>
+<body>
+
+<h1>Mine Guard</h1>
+<div class="subtitle">შახტის უსაფრთხოების ცენტრალური მონიტორინგი</div>
+
+<div id="banner" class="banner hidden"></div>
+
+<button class="add-btn" onclick="addNewBox()">+ ახალი ყუთის დამატება</button>
+<div class="grid" id="boxesGrid"></div>
+
+<script>
+// ============ პარამეტრები (საჭიროებისას შეცვალეთ) ============
+const GAS_LIMIT    = 400;    // გაზის კრიტიკული ზღვარი (ანალოგური მნიშვნელობა)
+const WINDOW_MS    = 30000;  // ტრენდის გასაანალიზებელი დროის ფანჯარა (30 წმ)
+const MIN_POINTS   = 5;      // მინიმუმ რამდენი გაზომვა სჭირდება ტრენდს
+const SLOPE_WARN   = 1.0;    // ზრდის სიჩქარე (ერთეული/წმ), რომლის ზემოთაც ვთვლით სწრაფ ზრდად
+const MIN_RISE     = 15;     // ფანჯარაში მინიმალური საერთო ზრდა (ხმაურისგან დასაცავად)
+const ETA_WARN_S   = 90;     // თუ ზღვრამდე ამდენ წამზე ნაკლები რჩება, ვაფრთხილებთ
+const LOST_MS      = 10000;  // ამდენი ხნის მონაცემის გარეშე ყუთს ვთვლით გათიშულად
+
+// ============ მდგომარეობა ============
+const boxes = {};            // id -> { hist:[{t,v}], lastSeen, temp, hum, gas, vib, status }
+let websocket;
+
+// ============ ტრენდი: უმცირეს კვადრატთა წრფივი რეგრესია ============
+function trend(points) {
+  const n = points.length;
+  const t0 = points[0].t;
+  let st = 0, sv = 0, stt = 0, stv = 0;
+  for (const p of points) {
+    const x = p.t - t0;
+    st += x; sv += p.v; stt += x * x; stv += x * p.v;
+  }
+  const den = n * stt - st * st;
+  if (den === 0) return null;
+  const slope = (n * stv - st * sv) / den;          // ერთეული წამში
+  const intercept = (sv - slope * st) / n;
+  const span = points[n - 1].t - t0;
+  const fitted = intercept + slope * span;          // მიმდინარე მნიშვნელობა (გასუფთავებული)
+  return { slope, fitted, span };
+}
+
+function evaluateGas(b) {
+  if (b.gas > GAS_LIMIT) {
+    return { level: 'alert', text: 'გაზი ზღვარს აჭარბებს!', rate: null };
+  }
+  if (b.hist.length >= MIN_POINTS) {
+    const tr = trend(b.hist);
+    if (tr) {
+      const rate = tr.slope * 60;                   // ერთეული წუთში
+      if (tr.slope > SLOPE_WARN && tr.slope * tr.span >= MIN_RISE) {
+        const eta = (GAS_LIMIT - tr.fitted) / tr.slope;
+        if (eta <= ETA_WARN_S) {
+          return { level: 'warn', rate,
+                   text: 'გაზი სწრაფად იზრდება, ზღვრამდე ~' + Math.max(1, Math.round(eta)) + ' წმ' };
+        }
+      }
+      return { level: 'ok', text: 'ნორმა', rate };
+    }
+  }
+  return { level: 'ok', text: 'მონაცემებს ვაგროვებთ...', rate: null };
+}
+
+// ============ ბარათის შექმნა ============
+function cardHTML(id) {
+  return `
+    <button class="remove-btn" onclick="removeBox('${id}')">✕</button>
+    <h2>ყუთი ${id}</h2>
+    <div class="data-row"><span>ტემპერატურა:</span> <span class="val" id="t-${id}">--</span></div>
+    <div class="data-row"><span>ტენიანობა:</span> <span class="val" id="h-${id}">--</span></div>
+    <div class="data-row"><span>გაზი:</span> <span class="val" id="g-${id}">--</span></div>
+    <div class="data-row"><span>გაზის ტრენდი:</span> <span class="val" id="r-${id}">--</span></div>
+    <div class="data-row"><span>ვიბრაცია:</span> <span id="v-${id}">--</span></div>
+    <div class="status" id="s-${id}">მონაცემი არ მიღებულა</div>`;
+}
+
+function createBox(id) {
+  boxes[id] = { hist: [], lastSeen: 0, temp: NaN, hum: NaN, gas: 0, vib: 1, status: { level: 'lost', text: '' } };
+  const card = document.createElement('div');
+  card.className = 'card lost';
+  card.id = 'card-' + id;
+  card.innerHTML = cardHTML(id);
+  document.getElementById('boxesGrid').appendChild(card);
+}
+
+function addNewBox() {
+  const n = Object.keys(boxes).length + 1;
+  const boxID = prompt('შეიყვანეთ ახალი ყუთის ID (მაგ: B' + n + '):', 'B' + n);
+  if (!boxID) return;
+  const cleanID = boxID.trim().toUpperCase();
+  if (boxes[cleanID]) { alert('ეს ID უკვე არსებობს!'); return; }
+  createBox(cleanID);
+  render();
+}
+
+function removeBox(id) {
+  const card = document.getElementById('card-' + id);
+  if (card) card.remove();
+  delete boxes[id];
+  render();
+}
+
+// ============ მონაცემების მიღება ============
+function handlePacket(raw) {
+  const parts = raw.split(',');
+  if (parts.length < 5) return;
+  const id = parts[0].trim();
+  const b = boxes[id];
+  if (!b) return;
+
+  const now = Date.now();
+  b.temp = parseFloat(parts[1]);
+  b.hum  = parseFloat(parts[2]);
+  b.gas  = parseInt(parts[3]);
+  b.vib  = parseInt(parts[4]);
+  b.lastSeen = now;
+
+  b.hist.push({ t: now / 1000, v: b.gas });
+  while (b.hist.length && now / 1000 - b.hist[0].t > WINDOW_MS / 1000) b.hist.shift();
+}
+
+function onMessage(event) {
+  // ESP-დან შეიძლება მოვიდეს მთელი ჯაჭვი: "B1,...|B2,...|B3,..."
+  event.data.split('|').forEach(function (chunk) {
+    chunk = chunk.trim();
+    if (chunk) handlePacket(chunk);
+  });
+  render();
+}
+
+// ============ ეკრანის განახლება ============
+function setText(id, text, cls) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerText = text;
+  if (cls !== undefined) el.className = cls;
+}
+
+function render() {
+  const now = Date.now();
+  const problems = [];
+
+  for (const id in boxes) {
+    const b = boxes[id];
+    const card = document.getElementById('card-' + id);
+    if (!card) continue;
+
+    const lost = !b.lastSeen || (now - b.lastSeen > LOST_MS);
+    let level, statusText;
+
+    if (lost) {
+      level = 'lost';
+      statusText = b.lastSeen ? 'კავშირი დაკარგულია' : 'მონაცემი არ მიღებულა';
+      problems.push({ level: 'warn', msg: id + ': ' + statusText + '. შესაძლო პრობლემა ამ უბანზე ან წინა რგოლში' });
+    } else {
+      const g = evaluateGas(b);
+      level = g.level;
+      statusText = g.text;
+      if (level === 'alert') problems.push({ level: 'alert', msg: id + ': ' + g.text });
+      if (level === 'warn')  problems.push({ level: 'warn',  msg: id + ': ' + g.text });
+
+      const tempTxt = isNaN(b.temp) ? 'შეცდომა' : (b.temp > 0 ? '+' : '') + b.temp.toFixed(1) + '°C';
+      setText('t-' + id, tempTxt);
+      setText('h-' + id, isNaN(b.hum) ? 'შეცდომა' : b.hum.toFixed(1) + ' %');
+      setText('g-' + id, String(b.gas), 'val');
+      const rateTxt = g.rate === null ? '--' : (g.rate > 0 ? '+' : '') + g.rate.toFixed(0) + ' / წთ';
+      setText('r-' + id, rateTxt, 'val');
+
+      if (b.vib === 0) setText('v-' + id, 'რყევა!', 'alert-txt');   // 0 = რყევა
+      else             setText('v-' + id, 'ნორმა', 'ok-txt');
+      if (b.vib === 0) problems.push({ level: 'alert', msg: id + ': რყევა დაფიქსირდა' });
+    }
+
+    card.className = 'card ' + (level === 'ok' ? '' : level);
+    const sEl = document.getElementById('s-' + id);
+    sEl.innerText = statusText;
+    sEl.className = 'status ' + (level === 'alert' ? 'alert-txt' : level === 'warn' ? 'warn-txt'
+                                : level === 'lost' ? 'lost-txt' : 'ok-txt');
+  }
+
+  // ზედა ბანერი
+  const banner = document.getElementById('banner');
+  if (problems.length === 0) {
+    banner.className = 'banner hidden';
+    banner.innerHTML = '';
+  } else {
+    const hasAlert = problems.some(function (p) { return p.level === 'alert'; });
+    banner.className = 'banner ' + (hasAlert ? 'alert' : 'warn');
+    banner.innerHTML = problems.map(function (p) { return (p.level === 'alert' ? '🚨 ' : '⚠️ ') + p.msg; }).join('<br>');
+  }
+}
+
+// ============ WebSocket ============
+function initWebSocket() {
+  websocket = new WebSocket(`ws://${window.location.hostname}/ws`);
+  websocket.onmessage = onMessage;
+  websocket.onclose = function () { setTimeout(initWebSocket, 2000); };
+}
+
+window.addEventListener('load', function () {
+  ['B1', 'B2', 'B3'].forEach(createBox);   // დემოსთვის 3 ყუთი
+  render();
+  initWebSocket();
+  setInterval(render, 1000);               // კავშირის დაკარგვის შესამოწმებლად
+});
+</script>
+</body>
+</html>
