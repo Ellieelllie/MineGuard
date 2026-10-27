@@ -1,247 +1,285 @@
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <ESPAsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <SoftwareSerial.h>
+
+// Wi-Fi წერტილი (Access Point)
+const char* ap_ssid = "Mine_Guard";
+const char* ap_pass = "mineguard123";
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+// HC-12: SoftwareSerial(RX, TX)
+// GPIO14 (D5) <- HC-12 TXD,  GPIO12 (D6) -> HC-12 RXD
+SoftwareSerial hc12(14, 12);
+
+// თითო ყუთის ბოლო მონაცემი (ახალ კლიენტს ყველა ყუთი ერთდროულად გაეგზავნება)
+#define MAX_BOXES 8
+String boxId[MAX_BOXES];
+String boxData[MAX_BOXES];
+
+void storeBox(const String& chunk) {
+  int c = chunk.indexOf(',');
+  if (c <= 0) return;
+  String id = chunk.substring(0, c);
+  for (int i = 0; i < MAX_BOXES; i++) {
+    if (boxId[i].length() == 0 || boxId[i] == id) {
+      boxId[i] = id;
+      boxData[i] = chunk;
+      return;
+    }
+  }
+}
+
+// ვებგვერდი (PROGMEM-ში)
+const char HTML_INDEX[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
-<html lang="ka">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mine Guard - ცენტრალური მონიტორინგი</title>
+<html lang="ka"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mine Guard</title>
 <style>
-  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:#0f172a; color:#f8fafc;
-         margin:0; padding:20px; display:flex; flex-direction:column; align-items:center; }
-  h1 { color:#38bdf8; margin-bottom:10px; }
-  .subtitle { color:#94a3b8; margin-bottom:20px; font-size:.95rem; }
-  .add-btn { background:#0284c7; color:#fff; border:none; padding:12px 24px; font-size:1rem; font-weight:bold;
-             border-radius:8px; cursor:pointer; margin-bottom:25px; transition:background .3s; }
-  .add-btn:hover { background:#0369a1; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:20px; width:100%; max-width:1200px; }
-  .card { background:#1e293b; border-radius:12px; padding:20px; box-shadow:0 10px 15px -3px rgba(0,0,0,.3);
-          border:2px solid #334155; text-align:center; position:relative; transition:border-color .3s; }
-  .card.warn  { border-color:#f59e0b; }
-  .card.alert { border-color:#ef4444; }
-  .card.lost  { border-color:#64748b; opacity:.75; }
-  .card h2 { color:#f43f5e; margin-top:0; border-bottom:1px solid #334155; padding-bottom:10px; }
-  .remove-btn { position:absolute; top:10px; right:10px; background:transparent; border:none; color:#94a3b8;
-                font-size:1.2rem; cursor:pointer; }
-  .remove-btn:hover { color:#ef4444; }
-  .data-row { font-size:1.05rem; margin:12px 0; display:flex; justify-content:space-between; padding:0 10px; }
-  .val { font-weight:bold; color:#38bdf8; }
-  .ok-txt { color:#4ade80; font-weight:bold; }
-  .warn-txt { color:#f59e0b; font-weight:bold; animation:blink 1s infinite; }
-  .alert-txt { color:#ef4444; font-weight:bold; animation:blink 1s infinite; }
-  .lost-txt { color:#94a3b8; font-weight:bold; }
-  .status { margin-top:14px; padding:8px; border-radius:8px; font-size:.95rem; font-weight:bold; background:#0f172a; }
-  .banner { width:100%; max-width:1200px; box-sizing:border-box; padding:14px 18px; margin-bottom:20px;
-            border-radius:10px; font-weight:bold; line-height:1.6; }
-  .banner.hidden { display:none; }
-  .banner.warn  { background:#78350f; border:1px solid #f59e0b; }
-  .banner.alert { background:#7f1d1d; border:1px solid #ef4444; }
-  @keyframes blink { 50% { opacity:.4; } }
-</style>
-</head>
-<body>
-
-<h1>Mine Guard</h1>
-<div class="subtitle">შახტის უსაფრთხოების ცენტრალური მონიტორინგი</div>
-
-<div id="banner" class="banner hidden"></div>
-
-<button class="add-btn" onclick="addNewBox()">+ ახალი ყუთის დამატება</button>
-<div class="grid" id="boxesGrid"></div>
-
+:root{--bg:#0f172a;--card:#1e293b;--line:#334155;--tx:#f8fafc;--mut:#94a3b8;--ok:#4ade80;--warn:#f59e0b;--bad:#ef4444;--blue:#38bdf8}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--tx);font:16px 'Segoe UI',Tahoma,sans-serif}
+.w{max-width:1200px;margin:0 auto}
+.top{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:12px}
+h1{margin:0;color:var(--blue);font-size:1.5rem}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.pill{padding:6px 12px;border-radius:20px;font-size:.85rem;font-weight:700;background:var(--card);border:1px solid var(--line)}
+.btn{background:#0284c7;color:#fff;border:0;padding:10px 14px;border-radius:8px;font-weight:700;cursor:pointer;min-height:44px}
+.btn.alt{background:var(--card);border:1px solid var(--line)}
+.btn.on{background:#15803d}
+#sys{padding:16px;border-radius:12px;font-size:1.3rem;font-weight:800;text-align:center;margin-bottom:12px;border:2px solid}
+#sys.safe{background:#052e16;border-color:var(--ok);color:var(--ok)}
+#sys.warn{background:#451a03;border-color:var(--warn);color:var(--warn)}
+#sys.bad{background:#450a0a;border-color:var(--bad);color:var(--bad);animation:bl 1s infinite}
+#sys small{display:block;font-size:.9rem;font-weight:600;margin-top:4px;color:var(--tx)}
+#demo{display:none;background:#312e81;border:1px solid #818cf8;padding:8px;border-radius:8px;text-align:center;margin-bottom:12px;font-weight:700}
+#chain{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:0;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px}
+.node{padding:10px 14px;border-radius:10px;border:2px solid var(--line);font-weight:700;text-align:center;min-width:70px;font-size:.95rem}
+.node small{display:block;font-weight:500;color:var(--mut);font-size:.7rem}
+.node.ok{border-color:var(--ok)}.node.warn{border-color:var(--warn)}.node.alert{border-color:var(--bad)}.node.lost{border-color:#64748b;opacity:.7}
+.node.esp{border-color:var(--blue);color:var(--blue)}
+.link{width:46px;height:4px;background:var(--ok);position:relative}
+.link.bad{background:repeating-linear-gradient(90deg,var(--bad) 0 6px,transparent 6px 10px)}
+.link:after{content:"←";position:absolute;top:-14px;left:16px;font-size:.8rem;color:var(--mut)}
+#brk{text-align:center;font-weight:700;color:var(--bad);margin:-4px 0 12px;min-height:1.2em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+.card{background:var(--card);border-radius:12px;padding:16px;border:2px solid var(--line);position:relative}
+.card.warn{border-color:var(--warn)}.card.alert{border-color:var(--bad)}.card.lost{border-color:#64748b;opacity:.8}
+.card h2{margin:0 0 8px;font-size:1.1rem;color:#fb7185;border-bottom:1px solid var(--line);padding-bottom:8px;cursor:pointer}
+.x{position:absolute;top:8px;right:10px;background:none;border:0;color:var(--mut);font-size:1.1rem;cursor:pointer}
+.dr{display:flex;justify-content:space-between;margin:8px 0}
+.v{font-weight:700;color:var(--blue)}
+.st{margin-top:8px;padding:8px;border-radius:8px;background:var(--bg);font-weight:700;font-size:.9rem}
+.ok-t{color:var(--ok)}.warn-t{color:var(--warn)}.alert-t{color:var(--bad)}.lost-t{color:var(--mut)}
+.fr{font-size:.75rem;color:var(--mut);margin-top:6px}
+canvas{width:100%;height:36px;display:block;margin-top:8px}
+#log{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:16px;max-height:220px;overflow:auto}
+#log div{padding:4px 0;border-bottom:1px solid var(--line);font-size:.9rem}
+#log b{color:var(--mut);margin-right:8px;font-weight:600}
+.pres .ctl{display:none}.pres .card{font-size:1.25rem}.pres #sys{font-size:2rem}
+@keyframes bl{50%{opacity:.6}}
+</style></head><body><div class="w">
+<div class="top"><h1>⛏ Mine Guard</h1>
+<div class="row"><span class="pill" id="esp">ESP ✗</span>
+<button class="btn alt ctl" id="bSnd" onclick="toggleSound()">🔇 ხმა</button>
+<button class="btn alt ctl" onclick="ack()">✔ დადასტურება</button>
+<button class="btn alt ctl" id="bDemo" onclick="toggleDemo()">▶ დემო</button>
+<button class="btn alt" onclick="document.body.classList.toggle('pres')">🖥 პრეზენტაცია</button></div></div>
+<div id="demo">დემო რეჟიმი: სიმულაცია, რეალური მონაცემები არ არის</div>
+<div id="sys" class="safe">✓ უსაფრთხო</div>
+<div id="chain"></div><div id="brk"></div>
+<div class="row ctl" style="margin-bottom:12px"><button class="btn" onclick="addBox()">+ ყუთი</button>
+<button class="btn alt" onclick="csv()">⬇ CSV</button></div>
+<div class="grid" id="grid"></div>
+<h3 style="margin:16px 0 0">მოვლენათა ჟურნალი</h3><div id="log"></div>
+</div>
 <script>
-// ============ პარამეტრები (საჭიროებისას შეცვალეთ) ============
-const GAS_LIMIT    = 400;    // გაზის კრიტიკული ზღვარი (ანალოგური მნიშვნელობა)
-const WINDOW_MS    = 30000;  // ტრენდის გასაანალიზებელი დროის ფანჯარა (30 წმ)
-const MIN_POINTS   = 5;      // მინიმუმ რამდენი გაზომვა სჭირდება ტრენდს
-const SLOPE_WARN   = 1.0;    // ზრდის სიჩქარე (ერთეული/წმ), რომლის ზემოთაც ვთვლით სწრაფ ზრდად
-const MIN_RISE     = 15;     // ფანჯარაში მინიმალური საერთო ზრდა (ხმაურისგან დასაცავად)
-const ETA_WARN_S   = 90;     // თუ ზღვრამდე ამდენ წამზე ნაკლები რჩება, ვაფრთხილებთ
-const LOST_MS      = 10000;  // ამდენი ხნის მონაცემის გარეშე ყუთს ვთვლით გათიშულად
+const LIM=400,CLEAR=350,WIN=30,MINP=5,SLOPE=1.0,RISE=15,ETA=90,LOST=10000,KEEP=300;
+const $=i=>document.getElementById(i);
+const boxes={},order=[],events=[],names={};
+let ws,demo=false,demoT,sound=false,acked=false,prevRank=0,actx,t0=0;
+try{Object.assign(names,JSON.parse(localStorage.getItem('mgNames')||'{}'))}catch(e){}
+const nm=id=>names[id]||id, hms=d=>new Date(d).toTimeString().slice(0,8);
 
-// ============ მდგომარეობა ============
-const boxes = {};            // id -> { hist:[{t,v}], lastSeen, temp, hum, gas, vib, status }
-let websocket;
+function trend(p){const n=p.length,a=p[0].t;let st=0,sv=0,stt=0,stv=0;
+ for(const q of p){const x=q.t-a;st+=x;sv+=q.v;stt+=x*x;stv+=x*q.v}
+ const d=n*stt-st*st;if(!d)return null;const s=(n*stv-st*sv)/d,ic=(sv-s*st)/n,sp=p[n-1].t-a;
+ return{s,f:ic+s*sp,sp}}
 
-// ============ ტრენდი: უმცირეს კვადრატთა წრფივი რეგრესია ============
-function trend(points) {
-  const n = points.length;
-  const t0 = points[0].t;
-  let st = 0, sv = 0, stt = 0, stv = 0;
-  for (const p of points) {
-    const x = p.t - t0;
-    st += x; sv += p.v; stt += x * x; stv += x * p.v;
-  }
-  const den = n * stt - st * st;
-  if (den === 0) return null;
-  const slope = (n * stv - st * sv) / den;          // ერთეული წამში
-  const intercept = (sv - slope * st) / n;
-  const span = points[n - 1].t - t0;
-  const fitted = intercept + slope * span;          // მიმდინარე მნიშვნელობა (გასუფთავებული)
-  return { slope, fitted, span };
-}
+function mk(id){boxes[id]={h:[],last:0,t:NaN,hu:NaN,g:0,v:1,hi:0,ga:false,sh:[],lvl:'init',txt:'',rate:null,lg:null};
+ order.push(id);const c=document.createElement('div');c.className='card lost';c.id='c-'+id;
+ c.innerHTML=`<button class="x ctl" onclick="rm('${id}')">✕</button><h2 id="n-${id}" title="სახელის შესაცვლელად ორჯერ დააჭირეთ" ondblclick="ren('${id}')"></h2>
+ <div class="dr"><span>ტემპერატურა</span><span class="v" id="t-${id}">--</span></div>
+ <div class="dr"><span>ტენიანობა</span><span class="v" id="u-${id}">--</span></div>
+ <div class="dr"><span>გაზი</span><span class="v" id="g-${id}">--</span></div>
+ <div class="dr"><span>ტრენდი</span><span class="v" id="r-${id}">--</span></div>
+ <div class="dr"><span>ვიბრაცია</span><span id="v-${id}">--</span></div>
+ <canvas id="s-${id}" width="240" height="36"></canvas>
+ <div class="st" id="st-${id}"></div><div class="fr" id="fr-${id}"></div>`;
+ $('grid').appendChild(c)}
+function addBox(){const id=(prompt('ID:','B'+(order.length+1))||'').trim().toUpperCase();
+ if(!id||boxes[id])return;mk(id);render()}
+function rm(id){const i=order.indexOf(id);if(i>-1)order.splice(i,1);delete boxes[id];$('c-'+id).remove();render()}
+function ren(id){const v=prompt('სახელი:',nm(id));if(v===null)return;names[id]=v.trim()||id;
+ try{localStorage.setItem('mgNames',JSON.stringify(names))}catch(e){}render()}
 
-function evaluateGas(b) {
-  if (b.gas > GAS_LIMIT) {
-    return { level: 'alert', text: 'გაზი ზღვარს აჭარბებს!', rate: null };
-  }
-  if (b.hist.length >= MIN_POINTS) {
-    const tr = trend(b.hist);
-    if (tr) {
-      const rate = tr.slope * 60;                   // ერთეული წუთში
-      if (tr.slope > SLOPE_WARN && tr.slope * tr.span >= MIN_RISE) {
-        const eta = (GAS_LIMIT - tr.fitted) / tr.slope;
-        if (eta <= ETA_WARN_S) {
-          return { level: 'warn', rate,
-                   text: 'გაზი სწრაფად იზრდება, ზღვრამდე ~' + Math.max(1, Math.round(eta)) + ' წმ' };
-        }
-      }
-      return { level: 'ok', text: 'ნორმა', rate };
+function pkt(raw){const p=raw.split(',');if(p.length<5)return;const b=boxes[p[0].trim()];if(!b)return;
+ const now=Date.now();b.t=parseFloat(p[1]);b.hu=parseFloat(p[2]);b.g=parseInt(p[3]);b.v=parseInt(p[4]);b.last=now;
+ b.h.push({t:now/1000,v:b.g});while(b.h.length&&now/1000-b.h[0].t>KEEP)b.h.shift();
+ if(b.g>LIM)b.hi++;else if(b.g<CLEAR){b.hi=0;b.ga=false}
+ if(b.hi>=2)b.ga=true;
+ b.sh=b.sh.filter(x=>now-x<10000);if(b.v===0)b.sh.push(now);
+ b.lg={time:now,g:b.g,t:b.t}}
+function onMsg(d){d.split('|').forEach(c=>{c=c.trim();if(c)pkt(c)});render()}
+
+function ev(b){const now=Date.now();
+ if(!b.last||now-b.last>LOST)return{l:'lost',x:b.last?'კავშირი დაკარგულია':'მონაცემი არ მიღებულა'};
+ if(b.ga)return{l:'alert',x:'გაზი ზღვარს აჭარბებს!'};
+ if(b.sh.length>=3)return{l:'alert',x:b.sh.length+' რყევა 10 წმ-ში!'};
+ const w=b.h.filter(q=>now/1000-q.t<=WIN);let rate=null;
+ if(w.length>=MINP){const r=trend(w);if(r){rate=r.s*60;
+  if(r.s>SLOPE&&r.s*r.sp>=RISE){const e=(LIM-r.f)/r.s;
+   if(e<=ETA)return{l:'warn',x:'გაზი სწრაფად იზრდება, ზღვრამდე ~'+Math.max(1,Math.round(e))+' წმ',rate}}}}
+ if(b.sh.length)return{l:'warn',x:'რყევა დაფიქსირდა',rate};
+ return{l:'ok',x:w.length>=MINP?'ნორმა':'მონაცემებს ვაგროვებთ...',rate}}
+
+function spark(id,b){const c=$('s-'+id),g=c.getContext('2d'),W=c.width,H=c.height;g.clearRect(0,0,W,H);
+ if(b.h.length<2)return;const now=Date.now()/1000,mx=Math.max(LIM*1.2,...b.h.map(q=>q.v));
+ const y=v=>H-2-(v/mx)*(H-4),x=t=>W-((now-t)/KEEP)*W;
+ g.strokeStyle='#ef4444';g.setLineDash([4,3]);g.beginPath();g.moveTo(0,y(LIM));g.lineTo(W,y(LIM));g.stroke();g.setLineDash([]);
+ g.strokeStyle='#38bdf8';g.lineWidth=1.5;g.beginPath();b.h.forEach((q,i)=>i?g.lineTo(x(q.t),y(q.v)):g.moveTo(x(q.t),y(q.v)));g.stroke()}
+
+const RK={ok:0,lost:1,warn:2,alert:3},CL={ok:'ok-t',lost:'lost-t',warn:'warn-t',alert:'alert-t'};
+function log(m){events.unshift({t:Date.now(),m});if(events.length>200)events.pop()}
+
+function render(){const now=Date.now();let top='ok',miss=null;const res={};
+ order.forEach(id=>{const b=boxes[id],r=ev(b);res[id]=r;
+  if(b.lvl==='init')b.lvl=r.l;else if(b.lvl!==r.l){
+   if(r.l==='lost')log('📡 '+nm(id)+': კავშირი გაწყდა'+(b.lg?' (ბოლო გაზი '+b.lg.g+')':''));
+   else if(r.l==='ok')log('✓ '+nm(id)+': '+(b.lvl==='lost'?'კავშირი აღდგა':'ნორმას დაუბრუნდა'));
+   else log((r.l==='alert'?'🚨 ':'⚠️ ')+nm(id)+': '+r.x);b.lvl=r.l}
+  if(RK[r.l]>RK[top])top=r.l});
+ for(let i=order.length-1;i>=0;i--){if(res[order[i]].l==='lost'){miss=order[i];break}}
+ order.forEach(id=>{const b=boxes[id],r=res[id],c=$('c-'+id);if(!c)return;
+  c.className='card '+(r.l==='ok'?'':r.l);$('n-'+id).innerText='ყუთი '+nm(id);
+  const lost=r.l==='lost';
+  if(!lost){$('t-'+id).innerText=isNaN(b.t)?'შეცდომა':b.t.toFixed(1)+'°C';
+   $('u-'+id).innerText=isNaN(b.hu)?'შეცდომა':b.hu.toFixed(1)+' %';$('g-'+id).innerText=b.g;
+   $('r-'+id).innerText=r.rate==null?'--':(r.rate>0?'+':'')+r.rate.toFixed(0)+' / წთ';
+   const v=$('v-'+id);v.innerText=b.v===0?'რყევა!':'ნორმა';v.className=b.v===0?'alert-t':'ok-t'}
+  $('st-'+id).innerText=(r.l==='alert'?'🚨 ':r.l==='warn'?'⚠️ ':r.l==='lost'?'📡 ':'✓ ')+r.x;$('st-'+id).className='st '+CL[r.l];
+  $('fr-'+id).innerText=lost&&b.lg?'ბოლო მონაცემი '+hms(b.lg.time)+': გაზი '+b.lg.g+', '+(isNaN(b.lg.t)?'--':b.lg.t.toFixed(1)+'°C')
+   :b.last?'განახლდა '+Math.round((now-b.last)/1000)+' წმ წინ':'';
+  spark(id,b)});
+ // chain map: ESP <- last box ... first box
+ let h='<div class="node esp">ESP<small>ზედაპირი</small></div>';
+ for(let i=order.length-1;i>=0;i--){const id=order[i],l=res[id].l;
+  h+='<div class="link '+(l==='lost'?'bad':'')+'"></div><div class="node '+l+'">'+nm(id)+'<small>'+(l==='lost'?'გათიშულია':l==='ok'?'ცოცხალია':l==='warn'?'გაფრთხილება':'საფრთხე')+'</small></div>'}
+ $('chain').innerHTML=h;
+ $('brk').innerText=miss?'ჯაჭვი გაწყვეტილია: '+nm(miss)+'-ზე ან მის წინა რგოლთან':'';
+ const bad=top==='alert',wr=top==='warn'||top==='lost';
+ $('sys').className=bad?'bad':wr?'warn':'safe';
+ $('sys').innerHTML=bad?'🚨 საშიშროება':wr?'⚠️ გაფრთხილება':'✓ უსაფრთხო';
+ $('log').innerHTML=events.slice(0,40).map(e=>'<div><b>'+hms(e.t)+'</b>'+e.m+'</div>').join('')||'<div>მოვლენა არ არის</div>';
+ const rk=RK[top];if(rk>prevRank&&rk>=2)acked=false;prevRank=rk;window._top=top;
+ $('esp').innerText=demo?'დემო':ws&&ws.readyState===1?'ESP ✓':'ESP ✗';
+ $('esp').style.color=demo?'#818cf8':ws&&ws.readyState===1?'#4ade80':'#ef4444'}
+
+// alarms
+function toggleSound(){sound=!sound;$('bSnd').innerText=sound?'🔊 ხმა':'🔇 ხმა';$('bSnd').classList.toggle('on',sound);
+ if(sound&&!actx)try{actx=new (window.AudioContext||window.webkitAudioContext)()}catch(e){}}
+function ack(){acked=true}
+function beep(f){if(!actx)return;const o=actx.createOscillator(),g=actx.createGain();o.frequency.value=f;o.connect(g);g.connect(actx.destination);
+ g.gain.value=.15;o.start();o.stop(actx.currentTime+.25)}
+setInterval(()=>{const t=window._top;if(acked||!sound)return;
+ if(t==='alert'){beep(880);if(navigator.vibrate)navigator.vibrate([300,100,300])}else if(t==='warn')beep(440)},1500);
+
+// demo simulator
+function demoTick(){const ph=(Date.now()-t0)/1000%100;
+ order.forEach((id,i)=>{let g=80+i*10+Math.random()*8,v=1;
+  if(id==='B2'&&ph>10&&ph<70)g=80+(ph-10)*7+Math.random()*8;
+  if(id==='B3'&&ph>30&&ph<34)v=0;
+  if(id==='B1'&&ph>55&&ph<80)return;
+  pkt(id+','+(24+i+Math.random()).toFixed(1)+','+(55+i*3).toFixed(1)+','+Math.round(g)+','+v)});render()}
+function toggleDemo(on){demo=on===undefined?!demo:on;$('demo').style.display=demo?'block':'none';
+ $('bDemo').classList.toggle('on',demo);$('bDemo').innerText=demo?'⏹ დემო':'▶ დემო';
+ clearInterval(demoT);if(demo){t0=Date.now();demoT=setInterval(demoTick,2000);demoTick()}render()}
+
+function csv(){let s='time,box,gas\n';order.forEach(id=>boxes[id].h.forEach(q=>s+=new Date(q.t*1000).toISOString()+','+id+','+q.v+'\n'));
+ const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([s],{type:'text/csv'}));a.download='mine_guard_log.csv';a.click()}
+
+function conn(){if(location.protocol==='file:')return;
+ try{ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+  ws.onmessage=e=>{if(!demo)onMsg(e.data)};ws.onclose=()=>{render();setTimeout(conn,2000)};ws.onopen=render}catch(e){setTimeout(conn,3000)}}
+
+window.addEventListener('load',()=>{['B1','B2','B3'].forEach(mk);render();conn();setInterval(render,1000);
+ if(location.protocol==='file:'||location.hash==='#demo')toggleDemo(true)});
+</script></body></html>
+)rawliteral";
+
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    Serial.printf("WebSocket კლიენტი დაკავშირდა: #%u\n", client->id());
+    for (int i = 0; i < MAX_BOXES; i++) {
+      if (boxData[i].length() > 0) client->text(boxData[i]);
     }
+  } else if (type == WS_EVT_DISCONNECT) {
+    Serial.printf("WebSocket კლიენტი გაეთიშა: #%u\n", client->id());
   }
-  return { level: 'ok', text: 'მონაცემებს ვაგროვებთ...', rate: null };
 }
 
-// ============ ბარათის შექმნა ============
-function cardHTML(id) {
-  return `
-    <button class="remove-btn" onclick="removeBox('${id}')">✕</button>
-    <h2>ყუთი ${id}</h2>
-    <div class="data-row"><span>ტემპერატურა:</span> <span class="val" id="t-${id}">--</span></div>
-    <div class="data-row"><span>ტენიანობა:</span> <span class="val" id="h-${id}">--</span></div>
-    <div class="data-row"><span>გაზი:</span> <span class="val" id="g-${id}">--</span></div>
-    <div class="data-row"><span>გაზის ტრენდი:</span> <span class="val" id="r-${id}">--</span></div>
-    <div class="data-row"><span>ვიბრაცია:</span> <span id="v-${id}">--</span></div>
-    <div class="status" id="s-${id}">მონაცემი არ მიღებულა</div>`;
+void handleChunk(String chunk) {
+  chunk.trim();
+  if (chunk.length() == 0) return;
+  storeBox(chunk);
+  ws.textAll(chunk);
 }
 
-function createBox(id) {
-  boxes[id] = { hist: [], lastSeen: 0, temp: NaN, hum: NaN, gas: 0, vib: 1, status: { level: 'lost', text: '' } };
-  const card = document.createElement('div');
-  card.className = 'card lost';
-  card.id = 'card-' + id;
-  card.innerHTML = cardHTML(id);
-  document.getElementById('boxesGrid').appendChild(card);
-}
+void setup() {
+  Serial.begin(115200);
+  hc12.begin(9600);
 
-function addNewBox() {
-  const n = Object.keys(boxes).length + 1;
-  const boxID = prompt('შეიყვანეთ ახალი ყუთის ID (მაგ: B' + n + '):', 'B' + n);
-  if (!boxID) return;
-  const cleanID = boxID.trim().toUpperCase();
-  if (boxes[cleanID]) { alert('ეს ID უკვე არსებობს!'); return; }
-  createBox(cleanID);
-  render();
-}
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ap_ssid, ap_pass);
 
-function removeBox(id) {
-  const card = document.getElementById('card-' + id);
-  if (card) card.remove();
-  delete boxes[id];
-  render();
-}
+  Serial.println("\nAccess Point გააქტიურდა");
+  Serial.print("Wi-Fi: ");
+  Serial.println(ap_ssid);
+  Serial.print("IP: ");
+  Serial.println(WiFi.softAPIP());   // 192.168.4.1
 
-// ============ მონაცემების მიღება ============
-function handlePacket(raw) {
-  const parts = raw.split(',');
-  if (parts.length < 5) return;
-  const id = parts[0].trim();
-  const b = boxes[id];
-  if (!b) return;
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
 
-  const now = Date.now();
-  b.temp = parseFloat(parts[1]);
-  b.hum  = parseFloat(parts[2]);
-  b.gas  = parseInt(parts[3]);
-  b.vib  = parseInt(parts[4]);
-  b.lastSeen = now;
-
-  b.hist.push({ t: now / 1000, v: b.gas });
-  while (b.hist.length && now / 1000 - b.hist[0].t > WINDOW_MS / 1000) b.hist.shift();
-}
-
-function onMessage(event) {
-  // ESP-დან შეიძლება მოვიდეს მთელი ჯაჭვი: "B1,...|B2,...|B3,..."
-  event.data.split('|').forEach(function (chunk) {
-    chunk = chunk.trim();
-    if (chunk) handlePacket(chunk);
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send_P(200, "text/html", HTML_INDEX);
   });
-  render();
+
+  server.begin();
 }
 
-// ============ ეკრანის განახლება ============
-function setText(id, text, cls) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.innerText = text;
-  if (cls !== undefined) el.className = cls;
-}
+void loop() {
+  ws.cleanupClients();
 
-function render() {
-  const now = Date.now();
-  const problems = [];
+  if (hc12.available()) {
+    String incoming = hc12.readStringUntil('\n');
+    incoming.trim();
+    if (incoming.length() == 0) return;
 
-  for (const id in boxes) {
-    const b = boxes[id];
-    const card = document.getElementById('card-' + id);
-    if (!card) continue;
+    Serial.print("HC-12-დან მიღებულია: ");
+    Serial.println(incoming);
 
-    const lost = !b.lastSeen || (now - b.lastSeen > LOST_MS);
-    let level, statusText;
-
-    if (lost) {
-      level = 'lost';
-      statusText = b.lastSeen ? 'კავშირი დაკარგულია' : 'მონაცემი არ მიღებულა';
-      problems.push({ level: 'warn', msg: id + ': ' + statusText + '. შესაძლო პრობლემა ამ უბანზე ან წინა რგოლში' });
-    } else {
-      const g = evaluateGas(b);
-      level = g.level;
-      statusText = g.text;
-      if (level === 'alert') problems.push({ level: 'alert', msg: id + ': ' + g.text });
-      if (level === 'warn')  problems.push({ level: 'warn',  msg: id + ': ' + g.text });
-
-      const tempTxt = isNaN(b.temp) ? 'შეცდომა' : (b.temp > 0 ? '+' : '') + b.temp.toFixed(1) + '°C';
-      setText('t-' + id, tempTxt);
-      setText('h-' + id, isNaN(b.hum) ? 'შეცდომა' : b.hum.toFixed(1) + ' %');
-      setText('g-' + id, String(b.gas), 'val');
-      const rateTxt = g.rate === null ? '--' : (g.rate > 0 ? '+' : '') + g.rate.toFixed(0) + ' / წთ';
-      setText('r-' + id, rateTxt, 'val');
-
-      if (b.vib === 0) setText('v-' + id, 'რყევა!', 'alert-txt');   // 0 = რყევა
-      else             setText('v-' + id, 'ნორმა', 'ok-txt');
-      if (b.vib === 0) problems.push({ level: 'alert', msg: id + ': რყევა დაფიქსირდა' });
+    // ჯაჭვის დაშლა '|' სიმბოლოთი, თითო ყუთი ცალ-ცალკე
+    int start = 0;
+    int sep = incoming.indexOf('|');
+    while (sep != -1) {
+      handleChunk(incoming.substring(start, sep));
+      start = sep + 1;
+      sep = incoming.indexOf('|', start);
     }
-
-    card.className = 'card ' + (level === 'ok' ? '' : level);
-    const sEl = document.getElementById('s-' + id);
-    sEl.innerText = statusText;
-    sEl.className = 'status ' + (level === 'alert' ? 'alert-txt' : level === 'warn' ? 'warn-txt'
-                                : level === 'lost' ? 'lost-txt' : 'ok-txt');
-  }
-
-  // ზედა ბანერი
-  const banner = document.getElementById('banner');
-  if (problems.length === 0) {
-    banner.className = 'banner hidden';
-    banner.innerHTML = '';
-  } else {
-    const hasAlert = problems.some(function (p) { return p.level === 'alert'; });
-    banner.className = 'banner ' + (hasAlert ? 'alert' : 'warn');
-    banner.innerHTML = problems.map(function (p) { return (p.level === 'alert' ? '🚨 ' : '⚠️ ') + p.msg; }).join('<br>');
+    handleChunk(incoming.substring(start));
   }
 }
-
-// ============ WebSocket ============
-function initWebSocket() {
-  websocket = new WebSocket(`ws://${window.location.hostname}/ws`);
-  websocket.onmessage = onMessage;
-  websocket.onclose = function () { setTimeout(initWebSocket, 2000); };
-}
-
-window.addEventListener('load', function () {
-  ['B1', 'B2', 'B3'].forEach(createBox);   // დემოსთვის 3 ყუთი
-  render();
-  initWebSocket();
-  setInterval(render, 1000);               // კავშირის დაკარგვის შესამოწმებლად
-});
-</script>
-</body>
-</html>
