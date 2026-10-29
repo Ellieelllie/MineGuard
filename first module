@@ -1,46 +1,97 @@
 #include <SoftwareSerial.h>
 #include <DHT.h>
 
-// 1. Pahilya box sathi BOX_ID "B1" theva
-const String BOX_ID = "B1"; 
+// ===== თითო ყუთზე მხოლოდ ეს ორი ხაზი იცვლება =====
+//   B1:  BOX_ID = "B1",  PREV_ID = ""     (ჯაჭვს ის იწყებს)
+//   B2:  BOX_ID = "B2",  PREV_ID = "B1"
+//   B3:  BOX_ID = "B3",  PREV_ID = "B2"
+const String BOX_ID  = "B1";
+const String PREV_ID = "";
+// ===================================================
 
 #define DHTPIN 4
 #define DHTTYPE DHT11
 #define MQ2PIN A0
 #define VIB_DO_PIN 5
 
+// რამდენ ხანში ერთხელ აგზავნის თავის პაკეტს (B1, ან timeout-ის შემდეგ B2/B3)
+const unsigned long SEND_EVERY = 3000;
+// რამდენ ხანს ელოდება წინა ყუთს, სანამ თავად დაიწყებს ჯაჭვს
+const unsigned long CHAIN_TIMEOUT = 7000;
+
 DHT dht(DHTPIN, DHTTYPE);
 SoftwareSerial hc12(2, 3); // RX = D2, TX = D3
 
-void setup() {
-  Serial.begin(9600);
-  hc12.begin(9600);
-  dht.begin();
-  
-  pinMode(MQ2PIN, INPUT);
-  pinMode(VIB_DO_PIN, INPUT);
-}
+unsigned long lastSend = 0;
+unsigned long lastFromPrev = 0;
 
-void loop() {
+// ჩვენი სენსორების პაკეტი: "B2,24.3,57.0,22,1"
+String myPacket() {
   float temp = dht.readTemperature();
   float hum = dht.readHumidity();
   int gas = analogRead(MQ2PIN);
-  int vib = digitalRead(VIB_DO_PIN); 
+  int vib = digitalRead(VIB_DO_PIN);
 
   if (isnan(temp) || isnan(hum)) {
     temp = 0.0;
     hum = 0.0;
   }
+  return BOX_ID + "," + String(temp, 1) + "," + String(hum, 1) + "," + String(gas) + "," + String(vib);
+}
 
-  static unsigned long lastSend = 0;
-  // Pratyek 3 secondanantara chain start karnyasathi packet pathva
-  if (millis() - lastSend > 3000) {
+// ხაზის ბოლო ელემენტის ID: "B1,...|B2,..." -> "B2"
+String lastId(const String& line) {
+  int p = line.lastIndexOf('|');
+  String last = (p == -1) ? line : line.substring(p + 1);
+  last.trim();
+  int c = last.indexOf(',');
+  if (c <= 0) return "";
+  return last.substring(0, c);
+}
+
+void setup() {
+  Serial.begin(9600);
+  hc12.begin(9600);
+  dht.begin();
+
+  pinMode(MQ2PIN, INPUT);
+  pinMode(VIB_DO_PIN, INPUT);
+
+  Serial.print(F("ყუთი "));
+  Serial.print(BOX_ID);
+  Serial.println(F(" ჩაირთო"));
+}
+
+void loop() {
+  bool isFirst = (PREV_ID.length() == 0);
+
+  // 1) მიღება: ვიღებთ მხოლოდ წინა ყუთის პაკეტს (ხაზის ბოლო ელემენტი = PREV_ID)
+  if (!isFirst && hc12.available() > 0) {
+    String line = hc12.readStringUntil('\n');
+    line.trim();
+
+    if (line.length() > 0) {
+      if (lastId(line) == PREV_ID) {
+        lastFromPrev = millis();
+        String full = line + "|" + myPacket();
+        delay(50); // მცირე დაყოვნება კონფლიქტის ასაცილებლად
+        hc12.println(full);
+        Serial.print(F("გადაგზავნილია: "));
+        Serial.println(full);
+      } else {
+        Serial.print(F("უგულებელყოფილია: "));
+        Serial.println(line);
+      }
+    }
+  }
+
+  // 2) საკუთარი ჯაჭვის დაწყება: B1 ყოველთვის; B2/B3 მხოლოდ timeout-ის შემდეგ
+  bool timedOut = !isFirst && (millis() - lastFromPrev > CHAIN_TIMEOUT);
+  if ((isFirst || timedOut) && millis() - lastSend >= SEND_EVERY) {
     lastSend = millis();
-    
-    // Keval shuddha packet format: "B1,24.3,57.0,22,1"
-    String packet = BOX_ID + "," + String(temp, 1) + "," + String(hum, 1) + "," + String(gas) + "," + String(vib);
-    
-    hc12.println(packet);
-    Serial.println("Gagzavnilia: " + packet);
+    String p = myPacket();
+    hc12.println(p);
+    Serial.print(timedOut ? F("წინა ყუთი ჩუმია, ვიწყებ ჯაჭვს: ") : F("გაგზავნილია: "));
+    Serial.println(p);
   }
 }
