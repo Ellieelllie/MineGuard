@@ -13,7 +13,7 @@ AsyncWebSocket ws("/ws");
 
 // HC-12: SoftwareSerial(RX, TX)
 // GPIO14 (D5) <- HC-12 TXD,  GPIO12 (D6) -> HC-12 RXD
-SoftwareSerial hc12(14, 12);
+SoftwareSerial hc12(14, 12, false, 128);
 
 // თითო ყუთის ბოლო მონაცემი (ახალ კლიენტს ყველა ყუთი ერთდროულად გაეგზავნება)
 #define MAX_BOXES 8
